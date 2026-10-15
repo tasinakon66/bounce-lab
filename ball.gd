@@ -52,10 +52,13 @@ func _ready() -> void:
 	linear_velocity = Vector2(cos(angle), sin(angle)) * start_speed
 
 func _draw() -> void:
+	# Undo the ball's spin, so everything below stays upright
+	draw_set_transform(Vector2.ZERO, -rotation)
+
 	# Soft glow, then the solid ball, then a small shine
 	draw_circle(Vector2.ZERO, radius + 6, Color(color, 0.25))
 	draw_circle(Vector2.ZERO, radius, color)
-	draw_circle(Vector2(-radius * 0.35, -radius * 0.35), radius * 0.22, Color(1, 1, 1, 0.5))
+	draw_circle(Vector2(-radius * 0.45, -radius * 0.45), radius * 0.15, Color(1, 1, 1, 0.5))
 
 	# Write the number in the middle
 	if level > 0:
@@ -66,6 +69,7 @@ func _draw() -> void:
 
 func _process(delta: float) -> void:
 	cooldown -= delta
+	queue_redraw()   # redraw every frame so the number stays upright
 
 func _physics_process(_delta: float) -> void:
 	# Keep checking balls we're resting against, not just new hits
