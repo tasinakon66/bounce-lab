@@ -8,6 +8,10 @@ extends RigidBody2D
 @export var level: int = 0               # 0 = normal ball, 1 = "2", 2 = "4", 3 = "8"...
 @export var bounce_sound: AudioStream = preload("res://ping.wav")
 @export var random_pitch: bool = true     # different note each bounce
+var picture: Texture2D = null             # user's photo/emoji (optional)
+var grow_on_hit: float = 0.0              # grow mode: how much bigger per bounce
+var max_radius: float = 470.0
+var circle_shape: CircleShape2D
 
 var sound_player: AudioStreamPlayer
 var cooldown := 0.0   # stops sounds stacking up too fast
@@ -20,9 +24,9 @@ func _ready() -> void:
 		color = Color.from_hsv(fmod(level * 0.13, 1.0), 0.6, 1.0)
 
 	# Make the hitbox match the ball size
-	var shape := CircleShape2D.new()
-	shape.radius = radius
-	$CollisionShape2D.shape = shape
+	circle_shape = CircleShape2D.new()
+	circle_shape.radius = radius
+	$CollisionShape2D.shape = circle_shape
 
 	# Make it bouncy and slippery
 	var mat := PhysicsMaterial.new()
@@ -52,6 +56,12 @@ func _ready() -> void:
 	linear_velocity = Vector2(cos(angle), sin(angle)) * start_speed
 
 func _draw() -> void:
+	# If the user picked a picture, draw that instead (it spins with the ball)
+	if picture:
+		draw_circle(Vector2.ZERO, radius + 6, Color(1, 1, 1, 0.25))
+		draw_texture_rect(picture, Rect2(-radius, -radius, radius * 2, radius * 2), false)
+		return
+
 	# Undo the ball's spin, so everything below stays upright
 	draw_set_transform(Vector2.ZERO, -rotation)
 
@@ -92,6 +102,13 @@ func try_merge(body: Node) -> void:
 
 func _on_hit(body: Node) -> void:
 	try_merge(body)
+
+	# Grow mode: get bigger every bounce
+	if grow_on_hit > 0.0 and radius < max_radius:
+		radius = min(radius + grow_on_hit, max_radius)
+		circle_shape.set_deferred("radius", radius)
+		if radius >= max_radius:
+			get_parent().win("FULL!")
 
 	# Bounce sound
 	if cooldown > 0.0:
