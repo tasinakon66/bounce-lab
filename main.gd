@@ -14,11 +14,34 @@ const MODE_NAMES := {
 }
 const SOUNDS := ["ping", "piano", "marimba", "bell", "pop", "retro"]
 
+# Songs: each number is a note, in semitones above/below middle of the sound
+# (all public-domain melodies, so no copyright problems)
+const MUSIC := {
+	"random notes": [],
+	"twinkle twinkle": [0,0,7,7,9,9,7, 5,5,4,4,2,2,0, 7,7,5,5,4,4,2, 7,7,5,5,4,4,2],
+	"ode to joy": [4,4,5,7,7,5,4,2,0,0,2,4,4,2,2, 4,4,5,7,7,5,4,2,0,0,2,4,2,0,0],
+	"fur elise": [4,3,4,3,4,-1,2,0,-3, -12,-8,-3,-1, -8,-4,-1,0, -8,4,3,4,3,4,-1,2,0,-3],
+	"happy birthday": [-5,-5,-3,-5,0,-1, -5,-5,-3,-5,2,0, -5,-5,7,4,0,-1,-3, 5,5,4,0,2,0],
+}
+# Picture packs for merge mode: one emoji per level (Twemoji, CC-BY 4.0)
+const PACKS := {
+	"fruits": ["1f352","1f353","1f347","1f34a","1f34b","1f34e","1f351","1f34d","1f348","1f349"],
+	"faces": ["1f642","1f60a","1f600","1f604","1f606","1f602","1f923","1f60e","1f929","1f973"],
+	"space": ["2b50","1f319","1f311","1f315","1f30d","1fa90","2600","1f31f","1f30c","1f320"],
+	"animals": ["1f41b","1f41f","1f430","1f431","1f436","1f98a","1f43c","1f981","1f418","1f40b"],
+	"numbers": [],
+	"my photos": [],
+}
+const RANDOM_SCALE := [0, 2, 4, 7, 9, 12]
+var note_index := 0
+static var texture_cache := {}
+
 # Player's choices. "static" means they survive scene restarts.
 static var data := {
 	"show_menu": true,
 	"mode": "bounce",
 	"sound": "ping",
+	"music": "random notes",
 	"picture": null,        # the user's chosen ball picture
 	# bounce / shared
 	"ball_count": 10,
@@ -28,6 +51,8 @@ static var data := {
 	# merge
 	"goal_level": 7,        # 7 = 128
 	"drop_interval": 0.8,
+	"pack": "fruits",
+	"level_pics": {},       # my photos: level number -> picture
 	# escape
 	"gap": 50.0,
 	"spin": 60.0,
@@ -74,9 +99,13 @@ func build_menu() -> void:
 	margin.add_theme_constant_override("margin_top", 120)
 	bg.add_child(margin)
 
+	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	margin.add_child(scroll)
 	var box := VBoxContainer.new()
+	box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	box.add_theme_constant_override("separation", 22)
-	margin.add_child(box)
+	scroll.add_child(box)
 
 	var title := Label.new()
 	title.text = "BounceLab"
@@ -94,6 +123,7 @@ func build_menu() -> void:
 
 	var mode_btn := big_button(box, 110)
 	var sound_btn := big_button(box, 90)
+	var music_btn := big_button(box, 90)
 
 	# One settings group per mode (only the chosen one is visible)
 	var groups := {}
@@ -113,6 +143,7 @@ func build_menu() -> void:
 	g = groups["merge"]
 	add_slider(g, "Goal", "goal_level", 3, 10, 1, "power")
 	add_slider(g, "Drop every", "drop_interval", 0.2, 2.0, 0.1, "seconds")
+	add_pack_picker(g)
 
 	g = groups["escape"]
 	add_slider(g, "Gap size", "gap", 20, 120, 5, "degrees")
@@ -131,6 +162,7 @@ func build_menu() -> void:
 	var refresh := func():
 		mode_btn.text = "Mode:  " + MODE_NAMES[data["mode"]]
 		sound_btn.text = "Sound:  " + str(data["sound"]).to_upper()
+		music_btn.text = "Notes:  " + str(data["music"]).to_upper()
 		for m in MODES:
 			groups[m].visible = m == data["mode"]
 	mode_btn.pressed.connect(func():
@@ -139,6 +171,11 @@ func build_menu() -> void:
 	sound_btn.pressed.connect(func():
 		data["sound"] = SOUNDS[(SOUNDS.find(data["sound"]) + 1) % SOUNDS.size()]
 		play_sound(data["sound"], 1.0)   # preview the sound
+		refresh.call())
+	music_btn.pressed.connect(func():
+		var keys := MUSIC.keys()
+		data["music"] = keys[(keys.find(data["music"]) + 1) % keys.size()]
+		note_index = 0
 		refresh.call())
 	refresh.call()
 
@@ -172,6 +209,85 @@ func add_slider(parent: Node, title: String, key: String, min_v: float, max_v: f
 		label.text = title + ":  " + format_value(v, kind))
 	parent.add_child(label)
 	parent.add_child(slider)
+
+# Merge mode: choose an emoji pack, or a photo for every level
+func add_pack_picker(parent: Node) -> void:
+	var pack_btn := big_button(parent, 100)
+	var rows := VBoxContainer.new()
+	rows.add_theme_constant_override("separation", 10)
+	parent.add_child(rows)
+	var preview := HBoxContainer.new()
+	preview.alignment = BoxContainer.ALIGNMENT_CENTER
+	parent.add_child(preview)
+
+	# One row per level for "my photos"
+	for lvl in range(1, 11):
+		var row := HBoxContainer.new()
+		var num := Label.new()
+		num.text = str(int(pow(2, lvl)))
+		num.custom_minimum_size = Vector2(130, 0)
+		row.add_child(num)
+		var pick := Button.new()
+		pick.custom_minimum_size = Vector2(0, 90)
+		pick.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		pick.expand_icon = true
+		pick.icon_alignment = HORIZONTAL_ALIGNMENT_LEFT
+		pick.text = "  choose photo..."
+		if data["level_pics"].has(lvl):
+			pick.icon = data["level_pics"][lvl]
+			pick.text = "  change"
+		pick.pressed.connect(func():
+			open_picture_dialog(func(tex):
+				data["level_pics"][lvl] = tex
+				pick.icon = tex
+				pick.text = "  change"))
+		row.add_child(pick)
+		rows.add_child(row)
+
+	var refresh := func():
+		pack_btn.text = "Pictures:  " + str(data["pack"]).to_upper()
+		rows.visible = data["pack"] == "my photos"
+		for c in preview.get_children():
+			c.queue_free()
+		for lvl in range(1, 8):
+			var tex = level_texture(lvl)
+			if tex:
+				var r := TextureRect.new()
+				r.texture = tex
+				r.custom_minimum_size = Vector2(110, 110)
+				r.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+				r.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+				preview.add_child(r)
+	pack_btn.pressed.connect(func():
+		var keys := PACKS.keys()
+		data["pack"] = keys[(keys.find(data["pack"]) + 1) % keys.size()]
+		refresh.call())
+	refresh.call()
+
+# The picture used for a merge level (or null = plain numbered ball)
+func level_texture(lvl: int) -> Texture2D:
+	if data["pack"] == "my photos":
+		return data["level_pics"].get(lvl, null)
+	var list: Array = PACKS[data["pack"]]
+	if list.is_empty() or lvl > list.size():
+		return null
+	var path := "res://emoji/%s.png" % list[lvl - 1]
+	if not texture_cache.has(path):
+		texture_cache[path] = load(path)
+	return texture_cache[path]
+
+func open_picture_dialog(on_done: Callable) -> void:
+	var dlg := FileDialog.new()
+	dlg.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	dlg.access = FileDialog.ACCESS_FILESYSTEM
+	dlg.filters = PackedStringArray(["*.png, *.jpg, *.jpeg, *.webp ; Images"])
+	dlg.use_native_dialog = true
+	dlg.file_selected.connect(func(path: String):
+		var tex := load_round_picture(path)
+		if tex:
+			on_done.call(tex))
+	ui.add_child(dlg)
+	dlg.popup_centered_ratio(0.8)
 
 func add_picture_buttons(parent: Node) -> void:
 	var row := HBoxContainer.new()
@@ -248,6 +364,18 @@ func play_sound(sound_name: String, pitch: float) -> void:
 	add_child(p)
 	p.play()
 	p.finished.connect(p.queue_free)
+
+# Each bounce asks for the next note: either the next note of the song,
+# or a random happy-sounding one
+func next_pitch() -> float:
+	var song: Array = MUSIC[data["music"]]
+	var semitone: int
+	if song.is_empty():
+		semitone = RANDOM_SCALE.pick_random()
+	else:
+		semitone = song[note_index % song.size()]
+		note_index += 1
+	return pow(2.0, semitone / 12.0)
 
 # ================= GAME =================
 func start_game() -> void:
@@ -338,17 +466,49 @@ func run_grow_mode() -> void:
 	add_child(ball)
 
 # ---------- MERGE MODE ----------
+# Test-tube shape: two straight walls and a round bottom, open at the top
+const TUBE_LEFT := 280.0
+const TUBE_RIGHT := 800.0
+const TUBE_TOP := 520.0
+const TUBE_BEND := 1250.0     # where the round bottom starts
+
+func build_tube() -> void:
+	arena.queue_free()
+	var body := StaticBody2D.new()
+	add_child(body)
+	var pts := tube_points()
+	for i in pts.size() - 1:
+		var seg := SegmentShape2D.new()
+		seg.a = pts[i]
+		seg.b = pts[i + 1]
+		var col := CollisionShape2D.new()
+		col.shape = seg
+		body.add_child(col)
+
+func tube_points() -> PackedVector2Array:
+	var r := (TUBE_RIGHT - TUBE_LEFT) / 2.0
+	var pts := PackedVector2Array([Vector2(TUBE_LEFT, TUBE_TOP)])
+	for i in range(0, 41):
+		var a := PI - PI * i / 40.0
+		pts.append(Vector2(540 + cos(a) * r, TUBE_BEND + sin(a) * r))
+	pts.append(Vector2(TUBE_RIGHT, TUBE_TOP))
+	return pts
+
 func run_merge_mode() -> void:
+	build_tube()
 	while not finished:
-		var pos := Vector2(540 + randf_range(-200, 200), 650)
-		spawn_number_ball(pos, 1)
+		# Drop one ball at a time from the opening at the top
+		spawn_number_ball(Vector2(540 + randf_range(-20, 20), 380), 1)
 		await get_tree().create_timer(data["drop_interval"]).timeout
 
 func spawn_number_ball(pos: Vector2, lvl: int) -> void:
 	var ball := ball_scene.instantiate()
 	ball.level = lvl
-	ball.start_speed = 150.0
-	ball.bounciness = 0.4
+	ball.start_speed = 0.0
+	ball.bounciness = 0.25
+	ball.friction = 0.3
+	ball.picture = level_texture(lvl)
+	ball.show_number = ball.picture == null
 	ball.bounce_sound = load("res://sounds/%s.wav" % data["sound"])
 	ball.position = pos
 	add_child(ball)
@@ -377,8 +537,10 @@ func _draw() -> void:
 	var gap := 14.0
 	var total := n * r * 2 + (n - 1) * gap
 	var x0 := 540 - total / 2 + r
-	var y := 1600.0
-	draw_string(font, Vector2(0, 1510), "Goal: " + str(int(pow(2, n))),
+	# Tube outline
+	draw_polyline(tube_points(), Color(0.6, 0.55, 1.0), 10.0, true)
+	var y := 1740.0
+	draw_string(font, Vector2(0, 1650), "Goal: " + str(int(pow(2, n))),
 		HORIZONTAL_ALIGNMENT_CENTER, 1080, 56, Color(1, 1, 1, 0.85))
 	for i in n:
 		var lvl := i + 1
@@ -386,6 +548,11 @@ func _draw() -> void:
 		if lvl > best_level:
 			c.a = 0.2
 		var p := Vector2(x0 + i * (r * 2 + gap), y)
+		var tex := level_texture(lvl)
+		if tex:
+			draw_texture_rect(tex, Rect2(p - Vector2(r, r), Vector2(r, r) * 2), false,
+				Color(1, 1, 1, 1.0 if lvl <= best_level else 0.25))
+			continue
 		draw_circle(p, r, c)
 		var txt := str(int(pow(2, lvl)))
 		var fs := 22 if txt.length() >= 4 else (26 if txt.length() == 3 else 32)
