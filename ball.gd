@@ -3,6 +3,8 @@ extends RigidBody2D
 # --- Settings you can change ---
 @export var start_speed: float = 900.0   # how fast it starts flying
 @export var bounciness: float = 1.0      # 1 = never loses energy
+@export var radius: float = 40.0         # ball size
+@export var color: Color = Color.WHITE   # ball colour
 @export var bounce_sound: AudioStream = preload("res://ping.wav")
 @export var random_pitch: bool = true     # different note each bounce
 
@@ -10,6 +12,11 @@ var sound_player: AudioStreamPlayer
 var cooldown := 0.0   # stops sounds stacking up too fast
 
 func _ready() -> void:
+	# Make the hitbox match the ball size
+	var shape := CircleShape2D.new()
+	shape.radius = radius
+	$CollisionShape2D.shape = shape
+
 	# Make it bouncy and slippery
 	var mat := PhysicsMaterial.new()
 	mat.bounce = bounciness
@@ -36,6 +43,12 @@ func _ready() -> void:
 	# Throw it in a random direction at the start
 	var angle := randf_range(0.0, TAU)
 	linear_velocity = Vector2(cos(angle), sin(angle)) * start_speed
+
+func _draw() -> void:
+	# Soft glow, then the solid ball, then a small shine
+	draw_circle(Vector2.ZERO, radius + 6, Color(color, 0.25))
+	draw_circle(Vector2.ZERO, radius, color)
+	draw_circle(Vector2(-radius * 0.35, -radius * 0.35), radius * 0.22, Color(1, 1, 1, 0.5))
 
 func _process(delta: float) -> void:
 	cooldown -= delta
