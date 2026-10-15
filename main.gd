@@ -1,668 +1,460 @@
 extends Node2D
+## BounceLab app shell: template gallery -> editor -> preview / record.
+## The Reels themselves live in res://templates/ (one file per template).
 
-@export var ball_scene: PackedScene = preload("res://ball.tscn")
-@export var auto_restart: bool = true    # start again after winning
-@export var restart_delay: float = 4.0   # seconds before restarting
-
-const CENTER := Vector2(540, 960)
-const MODES := ["bounce", "merge", "escape", "grow"]
-const MODE_NAMES := {
-	"bounce": "BOUNCE",
-	"merge": "MERGE  (2, 4, 8...)",
-	"escape": "ESCAPE THE RING",
-	"grow": "GROW TILL FULL",
-}
+const TEMPLATES := ["merge_flask", "friend_battle", "marble_race", "grow_spikes", "fill_circle", "escape_rings", "melody_bounce"]
 const SOUNDS := ["ping", "piano", "marimba", "bell", "pop", "retro"]
+const SETTINGS_FILE := "user://settings.json"
+const RECORD_FILE := "user://record.json"
+const OVERRIDE_FILE := "res://override.cfg"   # makes the recorder window 1080x1920
+const BASE := preload("res://templates/base_template.gd")
 
-# Songs: each number is a note, in semitones above/below middle of the sound
-# (all public-domain melodies, so no copyright problems)
-const MUSIC := {
-	"random notes": [],
-	"twinkle twinkle": [0,0,7,7,9,9,7, 5,5,4,4,2,2,0, 7,7,5,5,4,4,2, 7,7,5,5,4,4,2],
-	"ode to joy": [4,4,5,7,7,5,4,2,0,0,2,4,4,2,2, 4,4,5,7,7,5,4,2,0,0,2,4,2,0,0],
-	"fur elise": [4,3,4,3,4,-1,2,0,-3, -12,-8,-3,-1, -8,-4,-1,0, -8,4,3,4,3,4,-1,2,0,-3],
-	"happy birthday": [-5,-5,-3,-5,0,-1, -5,-5,-3,-5,2,0, -5,-5,7,4,0,-1,-3, 5,5,4,0,2,0],
-}
-# Picture packs for merge mode: one emoji per level (Twemoji, CC-BY 4.0)
-const PACKS := {
-	"fruits": ["1f352","1f353","1f347","1f34a","1f34b","1f34e","1f351","1f34d","1f348","1f349"],
-	"faces": ["1f642","1f60a","1f600","1f604","1f606","1f602","1f923","1f60e","1f929","1f973"],
-	"space": ["2b50","1f319","1f311","1f315","1f30d","1fa90","2600","1f31f","1f30c","1f320"],
-	"animals": ["1f41b","1f41f","1f430","1f431","1f436","1f98a","1f43c","1f981","1f418","1f40b"],
-	"numbers": [],
-	"my photos": [],
-}
-const RANDOM_SCALE := [0, 2, 4, 7, 9, 12]
-var note_index := 0
-static var texture_cache := {}
+const ACCENT := Color(0.62, 0.52, 1.0)
+const ACCENT_2 := Color(0.45, 0.9, 1.0)
+const BG := Color(0.035, 0.035, 0.08)
+const CARD := Color(0.09, 0.08, 0.16)
 
-# Player's choices. "static" means they survive scene restarts.
-static var data := {
-	"show_menu": true,
-	"mode": "bounce",
-	"sound": "ping",
-	"music": "random notes",
-	"picture": null,        # the user's chosen ball picture
-	# bounce / shared
-	"ball_count": 10,
-	"ball_size": 40.0,
-	"speed": 900.0,
-	"bounciness": 1.0,
-	# merge
-	"goal_level": 7,        # 7 = 128
-	"drop_interval": 0.45,
-	"pack": "fruits",
-	"level_pics": {},       # my photos: level number -> picture
-	# escape
-	"gap": 50.0,
-	"spin": 60.0,
-	"max_balls": 150,
-	# grow
-	"growth": 4.0,
-}
-
-var finished := false
-var best_level := 0
-var ui: CanvasLayer
-var counter: Label
-@onready var arena = $Arena
+var per := {}            # template id -> that template's settings (cfg)
+var current := "merge_flask"
+var screen: Control      # the menu screen currently shown
+var layer: CanvasLayer
+var playing: Node2D      # the running template (preview)
+var recording := false
+var theme_ui: Theme
 
 func _ready() -> void:
 	randomize()
-	ui = CanvasLayer.new()
-	add_child(ui)
-	# Testing shortcut: run with "-- --mode=merge" to skip the menu
-	for arg in OS.get_cmdline_user_args():
-		if arg.begins_with("--mode="):
-			data["mode"] = arg.substr(7)
-			data["show_menu"] = false
-	if data["show_menu"]:
-		build_menu()
-	else:
-		start_game()
+	theme_ui = make_theme()
+	layer = CanvasLayer.new()
+	layer.layer = 10
+	add_child(layer)
+	load_settings()
+	# The recorder's size override is only needed at start-up, so remove it now
+	# (also cleans up if a recording was interrupted)
+	if FileAccess.file_exists(OVERRIDE_FILE):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(OVERRIDE_FILE))
+	var args := OS.get_cmdline_user_args()
+	if "--record" in args:
+		start_recording_run()
+		return
+	# Testing shortcut: "-- --play=grow_spikes" skips the menus
+	for a in args:
+		if a.begins_with("--play="):
+			current = a.substr(7)
+			start_preview()
+			return
+		if a.begins_with("--edit="):
+			current = a.substr(7)
+			show_editor()
+			return
+	show_home()
 
-# ================= MENU =================
-func build_menu() -> void:
-	var theme := Theme.new()
-	theme.default_font_size = 44
+# On a computer, show a phone-shaped window that fits the screen.
+# (The recorder skips this so it can render a full 1080x1920 video.)
+func fit_window() -> void:
+	if OS.has_feature("mobile") or DisplayServer.get_name() == "headless":
+		return
+	var scr := DisplayServer.screen_get_usable_rect()
+	var h := int(scr.size.y * 0.9)
+	var w := int(h * 9.0 / 16.0)
+	get_window().size = Vector2i(w, h)
+	get_window().position = scr.position + (scr.size - Vector2i(w, h)) / 2
 
+# ================= settings =================
+static func template_script(id: String) -> Script:
+	return load("res://templates/%s.gd" % id)
+
+func cfg_for(id: String) -> Dictionary:
+	var m: Dictionary = template_script(id).meta()
+	var c: Dictionary = per.get(id, {})
+	# fill in anything missing (new settings added in later versions)
+	for k in m.defaults:
+		if not c.has(k):
+			c[k] = m.defaults[k]
+	var extra := {"hook": m.hook, "title": m.title, "pack": m.pack, "sound": "ping",
+		"outro": "Follow for part 2!", "glow": "gold & ice", "background": "space", "watermark": true,
+		"song": "twinkle twinkle", "photos": ["", "", "", "", "", "", "", "", "", ""]}
+	for k in extra:
+		if not c.has(k):
+			c[k] = extra[k]
+	per[id] = c
+	return c
+
+func load_settings() -> void:
+	if FileAccess.file_exists(SETTINGS_FILE):
+		var parsed = JSON.parse_string(FileAccess.get_file_as_string(SETTINGS_FILE))
+		if parsed is Dictionary:
+			per = parsed.get("per", {})
+			current = str(parsed.get("current", current))
+	if not current in TEMPLATES:
+		current = TEMPLATES[0]
+
+func save_settings() -> void:
+	var f := FileAccess.open(SETTINGS_FILE, FileAccess.WRITE)
+	if f:
+		f.store_string(JSON.stringify({"per": per, "current": current}))
+
+# ================= look =================
+func make_theme() -> Theme:
+	var t := Theme.new()
+	t.default_font_size = 44
+	var normal := StyleBoxFlat.new()
+	normal.bg_color = CARD
+	normal.set_corner_radius_all(30)
+	normal.border_color = Color(ACCENT, 0.45)
+	normal.set_border_width_all(2)
+	normal.content_margin_left = 30
+	normal.content_margin_right = 30
+	normal.content_margin_top = 18
+	normal.content_margin_bottom = 18
+	var hover: StyleBoxFlat = normal.duplicate()
+	hover.border_color = ACCENT_2
+	hover.bg_color = CARD.lightened(0.08)
+	var pressed: StyleBoxFlat = normal.duplicate()
+	pressed.bg_color = Color(ACCENT, 0.35)
+	for s in ["normal", "focus"]:
+		t.set_stylebox(s, "Button", normal)
+	t.set_stylebox("hover", "Button", hover)
+	t.set_stylebox("pressed", "Button", pressed)
+	t.set_color("font_color", "Button", Color.WHITE)
+	t.set_color("font_hover_color", "Button", Color.WHITE)
+	t.set_color("font_pressed_color", "Button", Color.WHITE)
+	t.set_constant("icon_max_width", "Button", 150)
+	t.set_constant("h_separation", "Button", 28)
+	var line: StyleBoxFlat = normal.duplicate()
+	line.bg_color = Color(0, 0, 0, 0.35)
+	t.set_stylebox("normal", "LineEdit", line)
+	t.set_stylebox("focus", "LineEdit", hover)
+	return t
+
+func new_screen() -> VBoxContainer:
+	if screen:
+		screen.queue_free()
 	var bg := ColorRect.new()
-	bg.color = Color(0.07, 0.07, 0.11, 0.93)
+	bg.color = BG
 	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
-	bg.theme = theme
-	ui.add_child(bg)
-
+	bg.theme = theme_ui
+	layer.add_child(bg)
+	screen = bg
 	var margin := MarginContainer.new()
 	margin.set_anchors_preset(Control.PRESET_FULL_RECT)
-	margin.add_theme_constant_override("margin_left", 90)
-	margin.add_theme_constant_override("margin_right", 90)
-	margin.add_theme_constant_override("margin_top", 120)
+	margin.add_theme_constant_override("margin_left", 60)
+	margin.add_theme_constant_override("margin_right", 60)
+	margin.add_theme_constant_override("margin_top", 90)
+	margin.add_theme_constant_override("margin_bottom", 60)
 	bg.add_child(margin)
-
 	var scroll := ScrollContainer.new()
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	margin.add_child(scroll)
 	var box := VBoxContainer.new()
 	box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	box.add_theme_constant_override("separation", 22)
+	box.add_theme_constant_override("separation", 24)
 	scroll.add_child(box)
+	return box
 
-	var title := Label.new()
-	title.text = "BounceLab"
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.add_theme_font_size_override("font_size", 120)
-	title.add_theme_color_override("font_color", Color(0.75, 0.7, 1.0))
-	box.add_child(title)
+func label(parent: Node, text: String, size: int = 44, color: Color = Color.WHITE,
+		align: HorizontalAlignment = HORIZONTAL_ALIGNMENT_LEFT) -> Label:
+	var l := Label.new()
+	l.text = text
+	l.add_theme_font_size_override("font_size", size)
+	l.add_theme_color_override("font_color", color)
+	l.horizontal_alignment = align
+	l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	parent.add_child(l)
+	return l
 
-	var sub := Label.new()
-	sub.text = "Make your own physics Reel"
-	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	sub.add_theme_color_override("font_color", Color(1, 1, 1, 0.6))
-	box.add_child(sub)
-	box.add_child(spacer(20))
-
-	var mode_btn := big_button(box, 110)
-	var sound_btn := big_button(box, 90)
-	var music_btn := big_button(box, 90)
-
-	# One settings group per mode (only the chosen one is visible)
-	var groups := {}
-	for m in MODES:
-		var g := VBoxContainer.new()
-		g.add_theme_constant_override("separation", 6)
-		box.add_child(g)
-		groups[m] = g
-
-	var g = groups["bounce"]
-	add_slider(g, "Balls", "ball_count", 1, 50, 1, "int")
-	add_slider(g, "Ball size", "ball_size", 15, 80, 1, "int")
-	add_slider(g, "Speed", "speed", 200, 2000, 50, "int")
-	add_slider(g, "Bounciness", "bounciness", 0.5, 1.0, 0.05, "percent")
-	add_picture_buttons(g)
-
-	g = groups["merge"]
-	add_slider(g, "Goal", "goal_level", 3, 10, 1, "power")
-	add_slider(g, "Drop every", "drop_interval", 0.2, 2.0, 0.1, "seconds")
-	add_pack_picker(g)
-
-	g = groups["escape"]
-	add_slider(g, "Gap size", "gap", 20, 120, 5, "degrees")
-	add_slider(g, "Ring spin", "spin", 0, 180, 5, "int")
-	add_slider(g, "Ball size", "ball_size", 15, 80, 1, "int")
-	add_slider(g, "Speed", "speed", 200, 2000, 50, "int")
-	add_slider(g, "Max balls", "max_balls", 20, 400, 10, "int")
-	add_picture_buttons(g)
-
-	g = groups["grow"]
-	add_slider(g, "Start size", "ball_size", 15, 80, 1, "int")
-	add_slider(g, "Growth per bounce", "growth", 1, 15, 0.5, "float")
-	add_slider(g, "Speed", "speed", 200, 2000, 50, "int")
-	add_picture_buttons(g)
-
-	var refresh := func():
-		mode_btn.text = "Mode:  " + MODE_NAMES[data["mode"]]
-		sound_btn.text = "Sound:  " + str(data["sound"]).to_upper()
-		music_btn.text = "Notes:  " + str(data["music"]).to_upper()
-		for m in MODES:
-			groups[m].visible = m == data["mode"]
-	mode_btn.pressed.connect(func():
-		data["mode"] = MODES[(MODES.find(data["mode"]) + 1) % MODES.size()]
-		refresh.call())
-	sound_btn.pressed.connect(func():
-		data["sound"] = SOUNDS[(SOUNDS.find(data["sound"]) + 1) % SOUNDS.size()]
-		play_sound(data["sound"], 1.0)   # preview the sound
-		refresh.call())
-	music_btn.pressed.connect(func():
-		var keys := MUSIC.keys()
-		data["music"] = keys[(keys.find(data["music"]) + 1) % keys.size()]
-		note_index = 0
-		refresh.call())
-	refresh.call()
-
-	box.add_child(spacer(30))
-	var start := big_button(box, 150)
-	start.text = "START"
-	start.add_theme_font_size_override("font_size", 70)
-	start.pressed.connect(func():
-		data["show_menu"] = false
-		bg.queue_free()
-		start_game())
-
-func big_button(parent: Node, height: float) -> Button:
+func button(parent: Node, text: String, height: float = 110) -> Button:
 	var b := Button.new()
+	b.text = text
 	b.custom_minimum_size = Vector2(0, height)
 	parent.add_child(b)
 	return b
-
-func add_slider(parent: Node, title: String, key: String, min_v: float, max_v: float,
-		step: float, kind: String) -> void:
-	var label := Label.new()
-	var slider := HSlider.new()
-	slider.min_value = min_v
-	slider.max_value = max_v
-	slider.step = step
-	slider.value = data[key]
-	slider.custom_minimum_size = Vector2(0, 60)
-	label.text = title + ":  " + format_value(data[key], kind)
-	slider.value_changed.connect(func(v):
-		data[key] = v
-		label.text = title + ":  " + format_value(v, kind))
-	parent.add_child(label)
-	parent.add_child(slider)
-
-# Merge mode: choose an emoji pack, or a photo for every level
-func add_pack_picker(parent: Node) -> void:
-	var pack_btn := big_button(parent, 100)
-	var rows := VBoxContainer.new()
-	rows.add_theme_constant_override("separation", 10)
-	parent.add_child(rows)
-	var preview := HBoxContainer.new()
-	preview.alignment = BoxContainer.ALIGNMENT_CENTER
-	parent.add_child(preview)
-
-	# One row per level for "my photos"
-	for lvl in range(1, 11):
-		var row := HBoxContainer.new()
-		var num := Label.new()
-		num.text = str(int(pow(2, lvl)))
-		num.custom_minimum_size = Vector2(130, 0)
-		row.add_child(num)
-		var pick := Button.new()
-		pick.custom_minimum_size = Vector2(0, 90)
-		pick.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		pick.expand_icon = true
-		pick.icon_alignment = HORIZONTAL_ALIGNMENT_LEFT
-		pick.text = "  choose photo..."
-		if data["level_pics"].has(lvl):
-			pick.icon = data["level_pics"][lvl]
-			pick.text = "  change"
-		pick.pressed.connect(func():
-			open_picture_dialog(func(tex):
-				data["level_pics"][lvl] = tex
-				pick.icon = tex
-				pick.text = "  change"))
-		row.add_child(pick)
-		rows.add_child(row)
-
-	var refresh := func():
-		pack_btn.text = "Pictures:  " + str(data["pack"]).to_upper()
-		rows.visible = data["pack"] == "my photos"
-		for c in preview.get_children():
-			c.queue_free()
-		for lvl in range(1, 8):
-			var tex = level_texture(lvl)
-			if tex:
-				var r := TextureRect.new()
-				r.texture = tex
-				r.custom_minimum_size = Vector2(110, 110)
-				r.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-				r.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-				preview.add_child(r)
-	pack_btn.pressed.connect(func():
-		var keys := PACKS.keys()
-		data["pack"] = keys[(keys.find(data["pack"]) + 1) % keys.size()]
-		refresh.call())
-	refresh.call()
-
-# The picture used for a merge level (or null = plain numbered ball)
-func level_texture(lvl: int) -> Texture2D:
-	if data["pack"] == "my photos":
-		return data["level_pics"].get(lvl, null)
-	var list: Array = PACKS[data["pack"]]
-	if list.is_empty() or lvl > list.size():
-		return null
-	var path := "res://emoji/%s.png" % list[lvl - 1]
-	if not texture_cache.has(path):
-		texture_cache[path] = load(path)
-	return texture_cache[path]
-
-func open_picture_dialog(on_done: Callable) -> void:
-	var dlg := FileDialog.new()
-	dlg.file_mode = FileDialog.FILE_MODE_OPEN_FILE
-	dlg.access = FileDialog.ACCESS_FILESYSTEM
-	dlg.filters = PackedStringArray(["*.png, *.jpg, *.jpeg, *.webp ; Images"])
-	dlg.use_native_dialog = true
-	dlg.file_selected.connect(func(path: String):
-		var tex := load_round_picture(path)
-		if tex:
-			on_done.call(tex))
-	ui.add_child(dlg)
-	dlg.popup_centered_ratio(0.8)
-
-func add_picture_buttons(parent: Node) -> void:
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 20)
-	parent.add_child(spacer(10))
-	parent.add_child(row)
-	var pick := Button.new()
-	pick.custom_minimum_size = Vector2(0, 100)
-	pick.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	row.add_child(pick)
-	var clear := Button.new()
-	clear.text = "Remove"
-	clear.custom_minimum_size = Vector2(220, 100)
-	row.add_child(clear)
-
-	var refresh := func():
-		pick.text = "Picture: " + ("CHOSEN (change)" if data["picture"] else "choose image...")
-		clear.disabled = data["picture"] == null
-	refresh.call()
-	# keep every copy of these buttons in sync
-	pick.visibility_changed.connect(refresh)
-
-	clear.pressed.connect(func():
-		data["picture"] = null
-		refresh.call())
-
-	pick.pressed.connect(func():
-		var dlg := FileDialog.new()
-		dlg.file_mode = FileDialog.FILE_MODE_OPEN_FILE
-		dlg.access = FileDialog.ACCESS_FILESYSTEM
-		dlg.filters = PackedStringArray(["*.png, *.jpg, *.jpeg, *.webp ; Images"])
-		dlg.use_native_dialog = true
-		dlg.file_selected.connect(func(path: String):
-			var tex := load_round_picture(path)
-			if tex:
-				data["picture"] = tex
-			refresh.call())
-		ui.add_child(dlg)
-		dlg.popup_centered_ratio(0.8))
-
-# Loads an image, crops it to a square, and cuts it into a circle
-func load_round_picture(path: String) -> Texture2D:
-	var img := Image.load_from_file(path)
-	if img == null or img.is_empty():
-		return null
-	var s := mini(img.get_width(), img.get_height())
-	img = img.get_region(Rect2i((img.get_width() - s) / 2, (img.get_height() - s) / 2, s, s))
-	img.resize(256, 256)
-	img.convert(Image.FORMAT_RGBA8)
-	for y in 256:
-		for x in 256:
-			if Vector2(x - 127.5, y - 127.5).length() > 128.0:
-				img.set_pixel(x, y, Color(0, 0, 0, 0))
-	return ImageTexture.create_from_image(img)
-
-func format_value(v: float, kind: String) -> String:
-	match kind:
-		"percent": return "%d%%" % int(round(v * 100))
-		"power": return str(int(pow(2, v)))
-		"seconds": return "%.1fs" % v
-		"degrees": return "%d°" % int(v)
-		"float": return "%.1f" % v
-	return str(int(v))
 
 func spacer(h: float) -> Control:
 	var c := Control.new()
 	c.custom_minimum_size = Vector2(0, h)
 	return c
 
-func play_sound(sound_name: String, pitch: float) -> void:
+func emoji(code: String) -> Texture2D:
+	return load("res://emoji/%s.png" % code)
+
+# ================= HOME: template gallery =================
+func show_home() -> void:
+	stop_preview()
+	var box := new_screen()
+	label(box, "BounceLab", 130, ACCENT, HORIZONTAL_ALIGNMENT_CENTER)
+	label(box, "Viral physics Reels in one tap", 46, Color(1, 1, 1, 0.6), HORIZONTAL_ALIGNMENT_CENTER)
+	box.add_child(spacer(30))
+	label(box, "CHOOSE A TEMPLATE", 34, ACCENT_2)
+	var grid := GridContainer.new()
+	grid.columns = 2
+	grid.add_theme_constant_override("h_separation", 24)
+	grid.add_theme_constant_override("v_separation", 24)
+	box.add_child(grid)
+	for id in TEMPLATES:
+		var m: Dictionary = template_script(id).meta()
+		var card := Button.new()
+		card.text = m.name
+		card.custom_minimum_size = Vector2(0, 560)
+		card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var thumb_path := "res://thumbs/%s.png" % id
+		card.icon = load(thumb_path) if ResourceLoader.exists(thumb_path) else emoji(m.icon)
+		card.expand_icon = true
+		card.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		card.vertical_icon_alignment = VERTICAL_ALIGNMENT_TOP
+		card.add_theme_constant_override("icon_max_width", 400)
+		card.add_theme_font_size_override("font_size", 40)
+		card.tooltip_text = m.tagline
+		card.pressed.connect(func():
+			current = id
+			show_editor())
+		grid.add_child(card)
+	box.add_child(spacer(20))
+	label(box, "Emoji art: Twemoji (CC-BY 4.0)", 26, Color(1, 1, 1, 0.3), HORIZONTAL_ALIGNMENT_CENTER)
+
+# ================= EDITOR: customise the Reel =================
+func show_editor() -> void:
+	stop_preview()
+	var m: Dictionary = template_script(current).meta()
+	var c := cfg_for(current)
+	var box := new_screen()
+
+	var back := button(box, "<  Templates", 90)
+	back.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	back.pressed.connect(show_home)
+	label(box, m.name, 90, ACCENT)
+	label(box, m.tagline, 38, Color(1, 1, 1, 0.6))
+
+	section(box, "TEXT")
+	text_field(box, "Hook (top of the video)", c, "hook")
+	text_field(box, "Theme (bottom - leave empty to hide)", c, "title")
+	text_field(box, "Ending message (shown when it finishes)", c, "outro")
+	if m.get("names", false):
+		text_field(box, "Fighter names, in order, separated by commas", c, "names")
+
+	section(box, "LOOK & SOUND")
+	pack_picker(box, c)
+	var sound_btn := button(box, "", 100)
+	var set_sound := func(): sound_btn.text = "Sound:  " + str(c.sound).to_upper()
+	set_sound.call()
+	sound_btn.pressed.connect(func():
+		c.sound = SOUNDS[(SOUNDS.find(c.sound) + 1) % SOUNDS.size()]
+		set_sound.call()
+		preview_sound(c.sound))
+	cycle_button(box, "Glow", c, "glow", BASE.GLOWS.keys())
+	cycle_button(box, "Background", c, "background", BASE.BACKGROUNDS)
+	var wm := CheckButton.new()
+	wm.text = "  'made with BounceLab' watermark"
+	wm.button_pressed = bool(c.watermark)
+	wm.toggled.connect(func(on): c.watermark = on)
+	box.add_child(wm)
+	if m.get("songs", false):
+		var songs: Array = template_script(current).SONGS.keys()
+		var song_btn := button(box, "", 100)
+		var set_song := func(): song_btn.text = "Song:  " + str(c.song).to_upper()
+		set_song.call()
+		song_btn.pressed.connect(func():
+			c.song = songs[(songs.find(c.song) + 1) % songs.size()]
+			set_song.call())
+
+	section(box, "PHYSICS")
+	for s in m.sliders:
+		slider(box, s[0], c, s[1], s[2], s[3], s[4], s[5])
+
+	box.add_child(spacer(20))
+	var play := button(box, "PREVIEW", 150)
+	play.add_theme_font_size_override("font_size", 60)
+	play.pressed.connect(func():
+		save_settings()
+		start_preview())
+	var rec := button(box, "RECORD VIDEO", 130)
+	rec.add_theme_color_override("font_color", Color(1, 0.55, 0.6))
+	var info := label(box, "", 32, Color(1, 1, 1, 0.6))
+	rec.pressed.connect(func():
+		save_settings()
+		info.text = record_video())
+	box.add_child(spacer(60))
+
+func cycle_button(parent: Node, title: String, c: Dictionary, key: String, options: Array) -> void:
+	var b := button(parent, "", 100)
+	var show := func(): b.text = title + ":  " + str(c[key]).to_upper()
+	show.call()
+	b.pressed.connect(func():
+		var i := options.find(c[key])
+		c[key] = options[(i + 1) % options.size()]
+		show.call())
+
+func section(parent: Node, text: String) -> void:
+	parent.add_child(spacer(10))
+	label(parent, text, 32, ACCENT_2)
+
+func text_field(parent: Node, title: String, c: Dictionary, key: String) -> void:
+	label(parent, title, 34, Color(1, 1, 1, 0.7))
+	var e := LineEdit.new()
+	e.text = str(c.get(key, ""))
+	e.custom_minimum_size = Vector2(0, 100)
+	e.text_changed.connect(func(t): c[key] = t)
+	parent.add_child(e)
+
+func slider(parent: Node, title: String, c: Dictionary, key: String,
+		lo: float, hi: float, step: float, kind: String) -> void:
+	var l := label(parent, "", 38)
+	var s := HSlider.new()
+	s.min_value = lo
+	s.max_value = hi
+	s.step = step
+	s.value = float(c.get(key, lo))
+	s.custom_minimum_size = Vector2(0, 64)
+	l.text = title + ":  " + fmt(s.value, kind)
+	s.value_changed.connect(func(v):
+		c[key] = v
+		l.text = title + ":  " + fmt(v, kind))
+	parent.add_child(s)
+
+static func fmt(v: float, kind: String) -> String:
+	match kind:
+		"percent": return "%d%%" % int(round(v * 100))
+		"percent_int": return "%d%%" % int(v)
+		"level": return "level %d  (= %d)" % [int(v), int(pow(2, v))]
+		"seconds": return "%.2fs" % v
+		"degrees": return "%d deg" % int(v)
+		"float": return "%.1f" % v
+	return str(int(v))
+
+func pack_picker(parent: Node, c: Dictionary) -> void:
+	var packs: Array = BASE.PACKS.keys()
+	var btn := button(parent, "", 100)
+	var preview := HBoxContainer.new()
+	preview.alignment = BoxContainer.ALIGNMENT_CENTER
+	parent.add_child(preview)
+	var rows := VBoxContainer.new()
+	rows.add_theme_constant_override("separation", 10)
+	parent.add_child(rows)
+	label(rows, "Pick a photo for each level, smallest first. Mum, dad, your cat... anything.", 32, Color(1, 1, 1, 0.6))
+	for i in 10:
+		var pick := button(rows, "", 96)
+		pick.expand_icon = true
+		pick.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		var refresh_row := func():
+			var path := str(c.photos[i])
+			pick.text = "%d.   %s" % [i + 1, path.get_file() if path != "" else "choose photo..."]
+			pick.icon = BASE.load_round_picture(path) if path != "" else null
+		refresh_row.call()
+		pick.pressed.connect(func():
+			pick_photo(func(path):
+				c.photos[i] = path
+				refresh_row.call()))
+
+	var refresh := func():
+		btn.text = "Pictures:  " + str(c.pack).to_upper()
+		rows.visible = c.pack == "my photos"
+		for child in preview.get_children():
+			child.queue_free()
+		var list: Array = BASE.PACKS[c.pack]
+		for code in list.slice(0, 8):
+			var r := TextureRect.new()
+			r.texture = emoji(code)
+			r.custom_minimum_size = Vector2(100, 100)
+			r.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			r.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			preview.add_child(r)
+		preview.visible = not list.is_empty()
+	btn.pressed.connect(func():
+		c.pack = packs[(packs.find(c.pack) + 1) % packs.size()]
+		refresh.call())
+	refresh.call()
+
+func pick_photo(on_done: Callable) -> void:
+	var dlg := FileDialog.new()
+	dlg.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	dlg.access = FileDialog.ACCESS_FILESYSTEM
+	dlg.filters = PackedStringArray(["*.png, *.jpg, *.jpeg, *.webp ; Images"])
+	dlg.use_native_dialog = true
+	dlg.file_selected.connect(func(path: String): on_done.call(path))
+	layer.add_child(dlg)
+	dlg.popup_centered_ratio(0.8)
+
+func preview_sound(sound_name: String) -> void:
 	var p := AudioStreamPlayer.new()
 	p.stream = load("res://sounds/%s.wav" % sound_name)
-	p.pitch_scale = pitch
 	add_child(p)
 	p.play()
 	p.finished.connect(p.queue_free)
 
-# Each bounce asks for the next note: either the next note of the song,
-# or a random happy-sounding one
-func next_pitch() -> float:
-	var song: Array = MUSIC[data["music"]]
-	var semitone: int
-	if song.is_empty():
-		semitone = RANDOM_SCALE.pick_random()
-	else:
-		semitone = song[note_index % song.size()]
-		note_index += 1
-	return pow(2.0, semitone / 12.0)
-
-# ================= GAME =================
-func start_game() -> void:
+# ================= PREVIEW =================
+func start_preview() -> void:
+	if screen:
+		screen.queue_free()
+		screen = null
+	spawn_template(cfg_for(current))
+	if recording:
+		return
 	var back := Button.new()
-	back.text = "< Menu"
+	back.text = "<  Edit"
+	back.theme = theme_ui
 	back.position = Vector2(30, 30)
-	back.add_theme_font_size_override("font_size", 44)
-	back.pressed.connect(func():
-		data["show_menu"] = true
-		get_tree().reload_current_scene())
-	ui.add_child(back)
+	back.custom_minimum_size = Vector2(220, 90)
+	back.pressed.connect(show_editor)
+	back.name = "BackButton"
+	layer.add_child(back)
 
-	queue_redraw()
-	match data["mode"]:
-		"merge": run_merge_mode()
-		"escape": run_escape_mode()
-		"grow": run_grow_mode()
-		_: run_bounce_mode()
+func spawn_template(c: Dictionary) -> void:
+	if playing:
+		playing.queue_free()
+	playing = template_script(current).new()
+	playing.cfg = c
+	playing.done.connect(_on_template_done)
+	add_child(playing)
 
-# Creates a ball with the player's sound, picture, size and speed
-func make_ball(pos: Vector2) -> RigidBody2D:
-	var ball := ball_scene.instantiate()
-	ball.radius = data["ball_size"]
-	ball.start_speed = data["speed"]
-	ball.bounciness = data["bounciness"]
-	ball.bounce_sound = load("res://sounds/%s.wav" % data["sound"])
-	ball.position = pos
-	if data["picture"]:
-		ball.picture = data["picture"]
+func _on_template_done() -> void:
+	if recording:
+		get_tree().quit()          # closing saves the video
 	else:
-		ball.modulate = Color.from_hsv(randf(), 0.6, 1.0)
-	ball.add_to_group("balls")
-	return ball
+		spawn_template(cfg_for(current))   # loop forever, like a Reel
 
-# ---------- BOUNCE MODE ----------
-func run_bounce_mode() -> void:
-	var delay: float = clamp(4.0 / float(data["ball_count"]), 0.05, 0.4)
-	for i in int(data["ball_count"]):
-		add_child(make_ball(CENTER + Vector2(randf_range(-150, 150), randf_range(-150, 150))))
-		await get_tree().create_timer(delay).timeout
+func stop_preview() -> void:
+	if playing:
+		playing.queue_free()
+		playing = null
+	var back := layer.get_node_or_null("BackButton")
+	if back:
+		back.queue_free()
 
-# ---------- ESCAPE MODE ----------
-# A spinning ring with a gap. Every ball that escapes becomes 2 new balls.
-func run_escape_mode() -> void:
-	arena.gap_degrees = data["gap"]
-	arena.spin_speed = data["spin"]
-	arena.build()
-	counter = Label.new()
-	counter.add_theme_font_size_override("font_size", 80)
-	counter.add_theme_color_override("font_outline_color", Color(0.4, 0.3, 0.9))
-	counter.add_theme_constant_override("outline_size", 16)
-	counter.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	counter.size = Vector2(1080, 120)
-	counter.position = Vector2(0, 260)
-	ui.add_child(counter)
-	add_child(make_ball(CENTER))
-	update_counter()
+# ================= RECORDING =================
+# Starts a second copy of the app with Godot's Movie Maker switched on.
+# It plays the Reel once at 1080x1920 / 60fps, then closes itself and the
+# video (with sound) is saved in Videos/BounceLab.
+func record_video() -> String:
+	var f := FileAccess.open(RECORD_FILE, FileAccess.WRITE)
+	f.store_string(JSON.stringify({"template": current, "cfg": cfg_for(current)}))
+	f.close()
+	var videos := OS.get_system_dir(OS.SYSTEM_DIR_MOVIES)
+	if videos == "":
+		videos = OS.get_user_data_dir()
+	var dir := videos.path_join("BounceLab")
+	DirAccess.make_dir_recursive_absolute(dir)
+	var stamp := Time.get_datetime_string_from_system().replace(":", "-").replace("T", "_")
+	var out := dir.path_join("%s_%s.avi" % [current, stamp])
+	# The preview window is phone-sized (405x720). For the video we want full
+	# 1080x1920, so the recorder starts with a temporary settings override.
+	var o := FileAccess.open(OVERRIDE_FILE, FileAccess.WRITE)
+	if o:
+		o.store_string("[display]\n\nwindow/size/window_width_override=1080\nwindow/size/window_height_override=1920\n")
+		o.close()
+	var args := PackedStringArray()
+	if OS.has_feature("editor"):
+		args.append_array(["--path", ProjectSettings.globalize_path("res://")])
+	args.append_array(["--write-movie", out, "--position", "0,0", "--", "--record"])
+	var pid := OS.create_process(OS.get_executable_path(), args)
+	if pid <= 0:
+		return "Could not start the recorder."
+	return "Recording in a new window. It closes by itself when the Reel ends.\nSaved to: " + out
 
-func update_counter() -> void:
-	if counter:
-		counter.text = "Balls: %d" % get_tree().get_nodes_in_group("balls").size()
-
-func _physics_process(_delta: float) -> void:
-	if data["mode"] != "escape" or finished or data["show_menu"]:
-		return
-	for ball in get_tree().get_nodes_in_group("balls"):
-		if ball.is_queued_for_deletion():
-			continue
-		if ball.position.distance_to(CENTER) > arena.radius + ball.radius + 20:
-			ball.remove_from_group("balls")
-			ball.queue_free()
-			play_sound(data["sound"], 2.0)
-			for i in 2:
-				if get_tree().get_nodes_in_group("balls").size() < int(data["max_balls"]):
-					add_child(make_ball(CENTER))
-	update_counter()
-	if get_tree().get_nodes_in_group("balls").size() >= int(data["max_balls"]):
-		finished = true
-		arena.spin_speed = 0.0
-		win(str(int(data["max_balls"])) + "!")
-
-# ---------- GROW MODE ----------
-# One ball that gets bigger every bounce until it fills the circle
-func run_grow_mode() -> void:
-	var ball := make_ball(CENTER)
-	ball.grow_on_hit = data["growth"]
-	ball.max_radius = arena.radius - 8
-	add_child(ball)
-
-# ---------- MERGE MODE ----------
-# Flask shape: a narrow neck at the top that opens into a big round bulb
-const NECK_LEFT := 440.0
-const NECK_RIGHT := 640.0
-const BULB_CENTER := Vector2(540, 970)
-const BULB_RADIUS := 500.0
-var stars := []
-
-func flask_points() -> PackedVector2Array:
-	var half := (NECK_RIGHT - NECK_LEFT) / 2.0
-	var join_y := BULB_CENTER.y - sqrt(BULB_RADIUS * BULB_RADIUS - half * half)
-	var a_left := atan2(join_y - BULB_CENTER.y, -half) + TAU    # about 258 degrees
-	var a_right := atan2(join_y - BULB_CENTER.y, half)          # about -78 degrees
-	var pts := PackedVector2Array([Vector2(NECK_LEFT, -300), Vector2(NECK_LEFT, join_y)])
-	var steps := 90
-	for i in range(1, steps):
-		var a: float = lerp(a_left, a_right, float(i) / steps)
-		pts.append(BULB_CENTER + Vector2(cos(a), sin(a)) * BULB_RADIUS)
-	pts.append(Vector2(NECK_RIGHT, join_y))
-	pts.append(Vector2(NECK_RIGHT, -300))
-	return pts
-
-func build_flask() -> void:
-	arena.queue_free()
-	var body := StaticBody2D.new()
-	add_child(body)
-	var pts := flask_points()
-	for i in pts.size() - 1:
-		var seg := SegmentShape2D.new()
-		seg.a = pts[i]
-		seg.b = pts[i + 1]
-		var col := CollisionShape2D.new()
-		col.shape = seg
-		body.add_child(col)
-	# Twinkly background stars
-	for i in 140:
-		stars.append([Vector2(randf() * 1080, randf() * 1920), randf_range(1.0, 3.0), randf() * TAU])
-	# "THEME: ..." title at the bottom, like the Reels
-	var title := RichTextLabel.new()
-	title.bbcode_enabled = true
-	title.fit_content = true
-	title.scroll_active = false
-	title.add_theme_font_size_override("normal_font_size", 84)
-	title.add_theme_constant_override("outline_size", 14)
-	title.add_theme_color_override("font_outline_color", Color.BLACK)
-	title.text = "[center][rainbow freq=0.25 sat=0.8 val=1.0]THEME:[/rainbow] %s[/center]" % str(data["pack"]).to_upper()
-	title.size = Vector2(1080, 140)
-	title.position = Vector2(0, 1530)
-	ui.add_child(title)
-
-func run_merge_mode() -> void:
-	build_flask()
-	while not finished:
-		# A steady single-file stream down the neck
-		spawn_number_ball(Vector2(540, -80), 1)
-		await get_tree().create_timer(data["drop_interval"]).timeout
-
-func _process(_delta: float) -> void:
-	if data["mode"] == "merge" and not data["show_menu"]:
-		queue_redraw()   # keeps the stars twinkling
-
-# Burst of little sparks where two balls merged
-func merge_burst(pos: Vector2, color: Color) -> void:
-	var p := CPUParticles2D.new()
-	p.position = pos
-	p.emitting = false
-	p.one_shot = true
-	p.amount = 40
-	p.lifetime = 0.6
-	p.explosiveness = 1.0
-	p.spread = 180.0
-	p.gravity = Vector2.ZERO
-	p.initial_velocity_min = 250.0
-	p.initial_velocity_max = 600.0
-	p.scale_amount_min = 4.0
-	p.scale_amount_max = 9.0
-	p.color = color
-	var fade := Gradient.new()
-	fade.set_color(0, Color(1, 1, 1, 1))
-	fade.set_color(1, Color(1, 1, 1, 0))
-	p.color_ramp = fade
-	add_child(p)
-	p.emitting = true
-	get_tree().create_timer(1.0).timeout.connect(p.queue_free)
-
-func spawn_number_ball(pos: Vector2, lvl: int) -> void:
-	var ball := ball_scene.instantiate()
-	ball.level = lvl
-	ball.start_speed = 0.0
-	ball.bounciness = 0.25
-	ball.friction = 0.3
-	ball.picture = level_texture(lvl)
-	ball.show_number = ball.picture == null
-	if lvl > 1:
-		# Merge juice: pop, sparks, and a note that rises with every level
-		ball.pop = 1.35
-		var t := ball.create_tween()
-		t.tween_property(ball, "pop", 1.0, 0.25).set_trans(Tween.TRANS_BACK)
-		merge_burst(pos, Color.from_hsv(fmod(lvl * 0.13, 1.0), 0.5, 1.0))
-		var steps := [0, 2, 4, 5, 7, 9, 11, 12, 14, 16]
-		play_sound(data["sound"], pow(2.0, steps[min(lvl - 2, 9)] / 12.0))
-	ball.bounce_sound = load("res://sounds/%s.wav" % data["sound"])
-	ball.position = pos
-	add_child(ball)
-	if lvl > best_level:
-		best_level = lvl
-		queue_redraw()
-
-func merge_balls(a: Node2D, b: Node2D) -> void:
-	var pos := (a.position + b.position) / 2.0
-	var new_level: int = a.level + 1
-	a.queue_free()
-	b.queue_free()
-	# Wait for physics to finish this frame before adding the new ball
-	call_deferred("spawn_number_ball", pos, new_level)
-	if new_level >= int(data["goal_level"]) and not finished:
-		finished = true
-		win(str(int(pow(2, new_level))) + "!")
-
-# Progress bar under the circle (merge mode)
-func _draw() -> void:
-	if data["show_menu"] or data["mode"] != "merge":
-		return
-	var font := ThemeDB.fallback_font
-	var n: int = int(data["goal_level"])
-	var r := 30.0
-	var gap := 12.0
-	var total := n * r * 2 + (n - 1) * gap
-	var x0 := 540 - total / 2 + r
-	# Space background with twinkling stars
-	draw_rect(Rect2(0, 0, 1080, 1920), Color(0.02, 0.02, 0.06))
-	var t := Time.get_ticks_msec() / 1000.0
-	for st in stars:
-		draw_circle(st[0], st[1], Color(1, 1, 1, 0.35 + 0.35 * sin(t * 2.0 + st[2])))
-	# Neon flask: glow layers, colour fading from gold at the top to cyan at the bottom
-	var pts := flask_points()
-	for layer in [[26.0, 0.10], [14.0, 0.25], [5.0, 1.0]]:
-		for i in pts.size() - 1:
-			var k: float = clamp((pts[i].y + 0.0) / 1500.0, 0.0, 1.0)
-			var c := Color(1.0, 0.75, 0.25).lerp(Color(0.45, 0.9, 1.0), k)
-			if layer[1] == 1.0:
-				c = c.lerp(Color.WHITE, 0.35)
-			c.a = layer[1]
-			draw_line(pts[i], pts[i + 1], c, layer[0], true)
-	var y := 1790.0
-	draw_string(font, Vector2(0, 1720), "Goal: " + str(int(pow(2, n))),
-		HORIZONTAL_ALIGNMENT_CENTER, 1080, 56, Color(1, 1, 1, 0.85))
-	for i in n:
-		var lvl := i + 1
-		var c := Color.from_hsv(fmod(lvl * 0.13, 1.0), 0.6, 1.0)
-		if lvl > best_level:
-			c.a = 0.2
-		var p := Vector2(x0 + i * (r * 2 + gap), y)
-		var tex := level_texture(lvl)
-		if tex:
-			draw_texture_rect(tex, Rect2(p - Vector2(r, r), Vector2(r, r) * 2), false,
-				Color(1, 1, 1, 1.0 if lvl <= best_level else 0.25))
-			continue
-		draw_circle(p, r, c)
-		var txt := str(int(pow(2, lvl)))
-		var fs := 22 if txt.length() >= 4 else (26 if txt.length() == 3 else 32)
-		draw_string(font, p + Vector2(-r, fs * 0.35), txt,
-			HORIZONTAL_ALIGNMENT_CENTER, r * 2, fs, Color(1, 1, 1, c.a + 0.3))
-
-# ---------- WIN MOMENT ----------
-func win(text: String) -> void:
-	if finished and data["mode"] == "grow":
-		return
-	finished = true
-	var layer := CanvasLayer.new()
-	add_child(layer)
-
-	var flash := ColorRect.new()
-	flash.color = Color(1, 1, 1, 0.8)
-	flash.size = Vector2(1080, 1920)
-	layer.add_child(flash)
-	create_tween().tween_property(flash, "color:a", 0.0, 0.6)
-
-	var label := Label.new()
-	label.text = text
-	label.add_theme_font_size_override("font_size", 200)
-	label.add_theme_color_override("font_color", Color.WHITE)
-	label.add_theme_color_override("font_outline_color", Color(0.4, 0.3, 0.9))
-	label.add_theme_constant_override("outline_size", 30)
-	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	label.size = Vector2(1080, 300)
-	label.position = Vector2(0, 160)
-	label.pivot_offset = Vector2(540, 150)
-	label.scale = Vector2.ZERO
-	layer.add_child(label)
-	var pop := create_tween()
-	pop.tween_property(label, "scale", Vector2(1.2, 1.2), 0.25).set_trans(Tween.TRANS_BACK)
-	pop.tween_property(label, "scale", Vector2.ONE, 0.15)
-
-	for pitch in [1.0, 1.26, 1.498, 2.0]:
-		play_sound(data["sound"], pitch)
-		await get_tree().create_timer(0.12).timeout
-
-	if auto_restart:
-		await get_tree().create_timer(restart_delay).timeout
-		get_tree().reload_current_scene()
+func start_recording_run() -> void:
+	recording = true
+	if FileAccess.file_exists(RECORD_FILE):
+		var parsed = JSON.parse_string(FileAccess.get_file_as_string(RECORD_FILE))
+		if parsed is Dictionary:
+			current = str(parsed.get("template", current))
+			per[current] = parsed.get("cfg", {})
+	start_preview()
