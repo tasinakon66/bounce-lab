@@ -1,0 +1,11 @@
+[gd_scene format=3 uid="uid://ccpxogfkpja0d"]
+
+[ext_resource type="Script" uid="uid://byw0fgyr7s8g7" path="res://main.gd" id="1_0xm2m"]
+[ext_resource type="Script" uid="uid://by2ux0b5wpknj" path="res://arena.gd" id="2_0xm2m"]
+
+[node name="main" type="Node2D" unique_id=747208764]
+script = ExtResource("1_0xm2m")
+ball_count = 20
+
+[node name="Arena" type="StaticBody2D" parent="." unique_id=965306285]
+script = ExtResource("2_0xm2m")
