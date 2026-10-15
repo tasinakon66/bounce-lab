@@ -50,7 +50,7 @@ static var data := {
 	"bounciness": 1.0,
 	# merge
 	"goal_level": 7,        # 7 = 128
-	"drop_interval": 0.8,
+	"drop_interval": 0.45,
 	"pack": "fruits",
 	"level_pics": {},       # my photos: level number -> picture
 	# escape
@@ -466,17 +466,32 @@ func run_grow_mode() -> void:
 	add_child(ball)
 
 # ---------- MERGE MODE ----------
-# Test-tube shape: two straight walls and a round bottom, open at the top
-const TUBE_LEFT := 280.0
-const TUBE_RIGHT := 800.0
-const TUBE_TOP := 520.0
-const TUBE_BEND := 1250.0     # where the round bottom starts
+# Flask shape: a narrow neck at the top that opens into a big round bulb
+const NECK_LEFT := 440.0
+const NECK_RIGHT := 640.0
+const BULB_CENTER := Vector2(540, 970)
+const BULB_RADIUS := 500.0
+var stars := []
 
-func build_tube() -> void:
+func flask_points() -> PackedVector2Array:
+	var half := (NECK_RIGHT - NECK_LEFT) / 2.0
+	var join_y := BULB_CENTER.y - sqrt(BULB_RADIUS * BULB_RADIUS - half * half)
+	var a_left := atan2(join_y - BULB_CENTER.y, -half) + TAU    # about 258 degrees
+	var a_right := atan2(join_y - BULB_CENTER.y, half)          # about -78 degrees
+	var pts := PackedVector2Array([Vector2(NECK_LEFT, -300), Vector2(NECK_LEFT, join_y)])
+	var steps := 90
+	for i in range(1, steps):
+		var a: float = lerp(a_left, a_right, float(i) / steps)
+		pts.append(BULB_CENTER + Vector2(cos(a), sin(a)) * BULB_RADIUS)
+	pts.append(Vector2(NECK_RIGHT, join_y))
+	pts.append(Vector2(NECK_RIGHT, -300))
+	return pts
+
+func build_flask() -> void:
 	arena.queue_free()
 	var body := StaticBody2D.new()
 	add_child(body)
-	var pts := tube_points()
+	var pts := flask_points()
 	for i in pts.size() - 1:
 		var seg := SegmentShape2D.new()
 		seg.a = pts[i]
@@ -484,22 +499,56 @@ func build_tube() -> void:
 		var col := CollisionShape2D.new()
 		col.shape = seg
 		body.add_child(col)
-
-func tube_points() -> PackedVector2Array:
-	var r := (TUBE_RIGHT - TUBE_LEFT) / 2.0
-	var pts := PackedVector2Array([Vector2(TUBE_LEFT, TUBE_TOP)])
-	for i in range(0, 41):
-		var a := PI - PI * i / 40.0
-		pts.append(Vector2(540 + cos(a) * r, TUBE_BEND + sin(a) * r))
-	pts.append(Vector2(TUBE_RIGHT, TUBE_TOP))
-	return pts
+	# Twinkly background stars
+	for i in 140:
+		stars.append([Vector2(randf() * 1080, randf() * 1920), randf_range(1.0, 3.0), randf() * TAU])
+	# "THEME: ..." title at the bottom, like the Reels
+	var title := RichTextLabel.new()
+	title.bbcode_enabled = true
+	title.fit_content = true
+	title.scroll_active = false
+	title.add_theme_font_size_override("normal_font_size", 84)
+	title.add_theme_constant_override("outline_size", 14)
+	title.add_theme_color_override("font_outline_color", Color.BLACK)
+	title.text = "[center][rainbow freq=0.25 sat=0.8 val=1.0]THEME:[/rainbow] %s[/center]" % str(data["pack"]).to_upper()
+	title.size = Vector2(1080, 140)
+	title.position = Vector2(0, 1530)
+	ui.add_child(title)
 
 func run_merge_mode() -> void:
-	build_tube()
+	build_flask()
 	while not finished:
-		# Drop one ball at a time from the opening at the top
-		spawn_number_ball(Vector2(540 + randf_range(-20, 20), 380), 1)
+		# A steady single-file stream down the neck
+		spawn_number_ball(Vector2(540, -80), 1)
 		await get_tree().create_timer(data["drop_interval"]).timeout
+
+func _process(_delta: float) -> void:
+	if data["mode"] == "merge" and not data["show_menu"]:
+		queue_redraw()   # keeps the stars twinkling
+
+# Burst of little sparks where two balls merged
+func merge_burst(pos: Vector2, color: Color) -> void:
+	var p := CPUParticles2D.new()
+	p.position = pos
+	p.emitting = false
+	p.one_shot = true
+	p.amount = 40
+	p.lifetime = 0.6
+	p.explosiveness = 1.0
+	p.spread = 180.0
+	p.gravity = Vector2.ZERO
+	p.initial_velocity_min = 250.0
+	p.initial_velocity_max = 600.0
+	p.scale_amount_min = 4.0
+	p.scale_amount_max = 9.0
+	p.color = color
+	var fade := Gradient.new()
+	fade.set_color(0, Color(1, 1, 1, 1))
+	fade.set_color(1, Color(1, 1, 1, 0))
+	p.color_ramp = fade
+	add_child(p)
+	p.emitting = true
+	get_tree().create_timer(1.0).timeout.connect(p.queue_free)
 
 func spawn_number_ball(pos: Vector2, lvl: int) -> void:
 	var ball := ball_scene.instantiate()
@@ -509,6 +558,14 @@ func spawn_number_ball(pos: Vector2, lvl: int) -> void:
 	ball.friction = 0.3
 	ball.picture = level_texture(lvl)
 	ball.show_number = ball.picture == null
+	if lvl > 1:
+		# Merge juice: pop, sparks, and a note that rises with every level
+		ball.pop = 1.35
+		var t := ball.create_tween()
+		t.tween_property(ball, "pop", 1.0, 0.25).set_trans(Tween.TRANS_BACK)
+		merge_burst(pos, Color.from_hsv(fmod(lvl * 0.13, 1.0), 0.5, 1.0))
+		var steps := [0, 2, 4, 5, 7, 9, 11, 12, 14, 16]
+		play_sound(data["sound"], pow(2.0, steps[min(lvl - 2, 9)] / 12.0))
 	ball.bounce_sound = load("res://sounds/%s.wav" % data["sound"])
 	ball.position = pos
 	add_child(ball)
@@ -533,14 +590,27 @@ func _draw() -> void:
 		return
 	var font := ThemeDB.fallback_font
 	var n: int = int(data["goal_level"])
-	var r := 34.0
-	var gap := 14.0
+	var r := 30.0
+	var gap := 12.0
 	var total := n * r * 2 + (n - 1) * gap
 	var x0 := 540 - total / 2 + r
-	# Tube outline
-	draw_polyline(tube_points(), Color(0.6, 0.55, 1.0), 10.0, true)
-	var y := 1740.0
-	draw_string(font, Vector2(0, 1650), "Goal: " + str(int(pow(2, n))),
+	# Space background with twinkling stars
+	draw_rect(Rect2(0, 0, 1080, 1920), Color(0.02, 0.02, 0.06))
+	var t := Time.get_ticks_msec() / 1000.0
+	for st in stars:
+		draw_circle(st[0], st[1], Color(1, 1, 1, 0.35 + 0.35 * sin(t * 2.0 + st[2])))
+	# Neon flask: glow layers, colour fading from gold at the top to cyan at the bottom
+	var pts := flask_points()
+	for layer in [[26.0, 0.10], [14.0, 0.25], [5.0, 1.0]]:
+		for i in pts.size() - 1:
+			var k: float = clamp((pts[i].y + 0.0) / 1500.0, 0.0, 1.0)
+			var c := Color(1.0, 0.75, 0.25).lerp(Color(0.45, 0.9, 1.0), k)
+			if layer[1] == 1.0:
+				c = c.lerp(Color.WHITE, 0.35)
+			c.a = layer[1]
+			draw_line(pts[i], pts[i + 1], c, layer[0], true)
+	var y := 1790.0
+	draw_string(font, Vector2(0, 1720), "Goal: " + str(int(pow(2, n))),
 		HORIZONTAL_ALIGNMENT_CENTER, 1080, 56, Color(1, 1, 1, 0.85))
 	for i in n:
 		var lvl := i + 1

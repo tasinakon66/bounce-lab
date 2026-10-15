@@ -11,6 +11,7 @@ extends RigidBody2D
 var picture: Texture2D = null             # user's photo/emoji (optional)
 var show_number: bool = true             # merge mode: write the number on the ball
 var friction: float = 0.0
+var pop: float = 1.0                      # >1 while popping in after a merge
 var grow_on_hit: float = 0.0              # grow mode: how much bigger per bounce
 var max_radius: float = 470.0
 var circle_shape: CircleShape2D
@@ -58,23 +59,24 @@ func _ready() -> void:
 	linear_velocity = Vector2(cos(angle), sin(angle)) * start_speed
 
 func _draw() -> void:
+	var rad := radius * pop
 	if picture:
 		# The picture spins with the ball
-		draw_texture_rect(picture, Rect2(-radius, -radius, radius * 2, radius * 2), false)
+		draw_texture_rect(picture, Rect2(-rad, -rad, rad * 2, rad * 2), false)
 	else:
 		# Undo the ball's spin so the shine stays in the top-left
 		draw_set_transform(Vector2.ZERO, -rotation)
-		draw_circle(Vector2.ZERO, radius + 6, Color(color, 0.25))
-		draw_circle(Vector2.ZERO, radius, color)
-		draw_circle(Vector2(-radius * 0.45, -radius * 0.45), radius * 0.15, Color(1, 1, 1, 0.5))
+		draw_circle(Vector2.ZERO, rad + 6, Color(color, 0.25))
+		draw_circle(Vector2.ZERO, rad, color)
+		draw_circle(Vector2(-rad * 0.45, -rad * 0.45), rad * 0.15, Color(1, 1, 1, 0.5))
 
 	# Number in the middle, always upright
 	if level > 0 and show_number:
 		draw_set_transform(Vector2.ZERO, -rotation)
 		var text := str(int(pow(2, level)))
 		var font := ThemeDB.fallback_font
-		var size := int(radius * 0.8)
-		draw_string(font, Vector2(-radius, size * 0.35), text, HORIZONTAL_ALIGNMENT_CENTER, radius * 2, size, Color.WHITE)
+		var size := int(rad * 0.8)
+		draw_string(font, Vector2(-rad, size * 0.35), text, HORIZONTAL_ALIGNMENT_CENTER, rad * 2, size, Color.WHITE)
 
 func _process(delta: float) -> void:
 	cooldown -= delta
