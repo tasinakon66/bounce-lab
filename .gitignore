@@ -11,3 +11,4 @@ PrivacyInfo.xcprivacy
 *.pck
 
 # macOS
+.DS_Store
