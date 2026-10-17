@@ -1,3 +1,14 @@
 # Godot 4+ specific ignores
 .godot/
 /android/
+
+# iOS export output (never commit)
+BounceLabIOS*
+*.xcframework/
+*.xcodeproj/
+PrivacyInfo.xcprivacy
+*.ipa
+*.pck
+
+# macOS
+.DS_Store
